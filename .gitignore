@@ -1,0 +1,27 @@
+# Real credentials - NEVER commit
+.env
+.env.local
+.env.production
+
+# Database files with real financial data
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Backup files
+backups/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Bank statements and receipts (sensitive)
+imports/bank_statements/
+imports/receipts/
+
+# OS
+.DS_Store
+Thumbs.db
