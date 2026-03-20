@@ -11,17 +11,17 @@ Run once against a fresh Abacus database to bootstrap everything.
 import asyncio
 import sys
 import os
+import uuid
 from pathlib import Path
-from datetime import date
 
 # Add the Abacus source to path
 ABACUS_ROOT = Path(os.environ.get("ABACUS_ROOT", "J:/QBO FOSS alternative"))
 sys.path.insert(0, str(ABACUS_ROOT))
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from abacus.models import (
-    Organization, User, Account,
+    Base, Organization, User, Account, UserRole,
     AccountType, AccountSubtype,
 )
 from abacus.auth import hash_password
@@ -34,8 +34,13 @@ DATABASE_URL = os.environ.get(
     "sqlite+aiosqlite:///data/ridge_cell_repair.db",
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+engine_kwargs = {"echo": False}
+if _is_sqlite:
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_async_engine(DATABASE_URL, **engine_kwargs)
+AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +49,7 @@ AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=F
 
 # Shorthand helpers
 A = AccountType.ASSET
+CA = AccountType.CONTRA_ASSET
 L = AccountType.LIABILITY
 E = AccountType.EQUITY
 R = AccountType.REVENUE
@@ -75,7 +81,7 @@ RCR_ACCOUNTS = [
     acct("1510", "Computer Equipment", A, AccountSubtype.FIXED_ASSET, "1500"),
     acct("1520", "Elegoo Carbon 3D Printer", A, AccountSubtype.FIXED_ASSET, "1500"),
     acct("1530", "Soldering & Lab Equipment", A, AccountSubtype.FIXED_ASSET, "1500"),
-    acct("1540", "Accumulated Depreciation", A, AccountSubtype.FIXED_ASSET, "1500"),
+    acct("1600", "Accumulated Depreciation", CA, None),
 
     # Liabilities
     acct("2000", "Credit Cards", L, AccountSubtype.CREDIT_CARD),
@@ -257,77 +263,80 @@ PERSONAL_ACCOUNTS = [
 
 
 # ---------------------------------------------------------------------------
+# Normal balance logic (matches ledger.py NORMAL_BALANCE_MAP)
+# ---------------------------------------------------------------------------
+DEBIT_TYPES = {A, X, AccountType.CONTRA_LIABILITY, AccountType.CONTRA_EQUITY, AccountType.CONTRA_REVENUE}
+CREDIT_TYPES = {L, E, R, CA, AccountType.CONTRA_EXPENSE}
+
+def normal_balance(typ):
+    if typ in DEBIT_TYPES:
+        return "debit"
+    return "credit"
+
+
+# ---------------------------------------------------------------------------
 # Seed logic
 # ---------------------------------------------------------------------------
 
 ORGS = [
     {
         "name": "Ridge Cell Repair LLC",
-        "fiscal_year_start": 1,
-        "currency": "USD",
+        "fiscal_year_start_month": 1,
+        "default_currency": "USD",
         "accounts": RCR_ACCOUNTS,
     },
     {
         "name": "Kalshi Trading",
-        "fiscal_year_start": 1,
-        "currency": "USD",
+        "fiscal_year_start_month": 1,
+        "default_currency": "USD",
         "accounts": KALSHI_ACCOUNTS,
     },
     {
         "name": "Personal - Matt Gates",
-        "fiscal_year_start": 1,
-        "currency": "USD",
+        "fiscal_year_start_month": 1,
+        "default_currency": "USD",
         "accounts": PERSONAL_ACCOUNTS,
     },
 ]
 
 
 async def seed():
-    from sqlalchemy import text
-
     async with engine.begin() as conn:
-        # Import metadata and create tables if they don't exist
-        from abacus.models import Base
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as session:
-        # Create admin user
-        admin = User(
-            email="matt@ridgecellrepair.com",
-            hashed_password=hash_password("changeme"),
-            full_name="Matt Gates",
-            role="admin",
-            is_active=True,
-        )
-        session.add(admin)
-        await session.flush()
+        first_org_id = None
 
         for org_def in ORGS:
             org = Organization(
+                id=uuid.uuid4(),
                 name=org_def["name"],
-                fiscal_year_start=org_def["fiscal_year_start"],
-                currency=org_def["currency"],
+                fiscal_year_start_month=org_def["fiscal_year_start_month"],
+                default_currency=org_def["default_currency"],
             )
             session.add(org)
             await session.flush()
 
-            # Assign admin to org
-            admin.organization_id = admin.organization_id or org.id
+            if first_org_id is None:
+                first_org_id = org.id
 
             # Build accounts - two passes for parent references
             code_to_id = {}
+
             # First pass: accounts without parents
             for a in org_def["accounts"]:
                 if a["parent_code"] is not None:
                     continue
                 account = Account(
+                    id=uuid.uuid4(),
                     organization_id=org.id,
-                    code=a["code"],
+                    account_number=a["code"],
                     name=a["name"],
-                    type=a["type"],
-                    subtype=a["subtype"],
-                    normal_balance="debit" if a["type"] in (A, X) else "credit",
+                    account_type=a["type"],
+                    account_subtype=a["subtype"],
+                    normal_balance=normal_balance(a["type"]),
                     is_active=True,
+                    is_system=True,
                 )
                 session.add(account)
                 await session.flush()
@@ -338,20 +347,34 @@ async def seed():
                 if a["parent_code"] is None:
                     continue
                 account = Account(
+                    id=uuid.uuid4(),
                     organization_id=org.id,
-                    code=a["code"],
+                    account_number=a["code"],
                     name=a["name"],
-                    type=a["type"],
-                    subtype=a["subtype"],
-                    normal_balance="debit" if a["type"] in (A, X) else "credit",
+                    account_type=a["type"],
+                    account_subtype=a["subtype"],
+                    normal_balance=normal_balance(a["type"]),
                     parent_id=code_to_id.get(a["parent_code"]),
                     is_active=True,
+                    is_system=True,
                 )
                 session.add(account)
                 await session.flush()
                 code_to_id[a["code"]] = account.id
 
             print(f"  Created org '{org_def['name']}' with {len(org_def['accounts'])} accounts")
+
+        # Create admin user (assigned to first org)
+        admin = User(
+            id=uuid.uuid4(),
+            organization_id=first_org_id,
+            email="matt@ridgecellrepair.com",
+            hashed_password=hash_password("changeme"),
+            full_name="Matt Gates",
+            role=UserRole.ADMIN,
+            is_active=True,
+        )
+        session.add(admin)
 
         await session.commit()
         print("\nDone. Admin user: matt@ridgecellrepair.com / changeme")
