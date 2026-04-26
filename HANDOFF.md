@@ -1,7 +1,84 @@
 # Abacus — CNC-Server Deployment Handoff
 
-**Session:** 2026-04-23 → early 2026-04-24
+**Session:** 2026-04-23 → early 2026-04-24, then 2026-04-25 (integration sprint)
 **Author:** Opus 4.7 (Claude Code session on kokonoe)
+
+> **✅ PerformanceTracker integration request fulfilled (2026-04-25).**
+> Live at `https://cnc-server.tailb85819.ts.net/abacus/api/v1/`. Auth: `X-API-Key` header.
+> Endpoints: `/health`, `/orgs`, `/revenue`, `/spending`. systemd unit `abacus-api.service`
+> running on CNC. API keys for both iOS apps in `J:/abacus-meatspace/.secrets/integration-keys.json`.
+> See "v1 Integration API (2026-04-25)" section below for full details.
+> Deferred: `/clients` (no Vendor model yet) and `/kalshi/pnl` (separate system).
+
+## v1 Integration API (2026-04-25)
+
+### What shipped this session
+- **New module:** `abacus/api/integrations.py` — versioned `/api/v1/*` read-only endpoints
+- **Routes mounted in `main.py`** under `/api/v1` prefix
+- **Synced to CNC:** `/opt/abacus/src/abacus/api/integrations.py` + updated `main.py`
+- **systemd unit:** `/etc/systemd/system/abacus-api.service` — enabled + active, `--host 127.0.0.1 --port 8000`
+- **Logs:** `/opt/abacus/logs/uvicorn.log` (append mode, both stdout + stderr)
+- **Tailscale serve:** `/abacus` → `http://127.0.0.1:8000` (path prefix is stripped by tailscale)
+- **API keys minted:** PerformanceTracker iOS + Abacus iOS, stored in `J:/abacus-meatspace/.secrets/integration-keys.json` (gitignored)
+
+### Endpoint reference
+Base: `https://cnc-server.tailb85819.ts.net/abacus/api/v1`
+Auth: `X-API-Key: ol_...` (admin role required for cross-org reads)
+
+| Method | Path | Query | Notes |
+|--------|------|-------|-------|
+| GET | `/health` | — | Liveness + txn count + last-import date |
+| GET | `/orgs` | — | All orgs for admin; user's own org otherwise |
+| GET | `/revenue` | `since`, `until`, `org_id?`, `include_entries?` | Revenue total + optional per-entry detail |
+| GET | `/spending` | `since`, `until`, `org_id?` | Expense total + by-account breakdown |
+
+`org_id` is the UUID from `/orgs`. If omitted, falls back to caller's primary org. Admin keys can pass any org_id.
+
+### Smoke-test results (2026-04-25 18:08 PT)
+- `/health` → 200, 308 transactions, last txn 2026-03-31
+- `/orgs` → 3 orgs (Kalshi Trading, Personal - Matt Gates, Ridge Cell Repair LLC)
+- `/revenue?since=2026-01-01&until=2026-04-25` (Personal) → $348.18 YTD
+- `/spending?since=2026-04-01&until=2026-04-25` (Personal) → $0 (April has no posted expense entries — possibly because the 81 review-queue txns include April spending that hasn't been classified/posted yet; LLM pass when P100s land will fix)
+
+### What PerformanceTracker session needs to do next
+1. Read `INTEGRATION-REQUEST-PERFORMANCETRACKER.md` (still authoritative for what to consume)
+2. Create `AbacusService.swift` in `J:\fitness\PerformanceTracker\` using the URL + key from `.secrets/integration-keys.json`
+3. Wire it into the grading engine as the Revenue (20%) + Strategy (5%) signal source
+4. Manual entry path stays as fallback when Tailscale unreachable
+
+### What the existing Abacus iOS app needs
+- The shell at `J:/QBO FOSS alternative/ios/Abacus/` is already wired for `X-API-Key` (`Data/Remote/AuthInterceptor.swift:6`). It uses Keychain-stored `serverUrl` + `apiKey` set via the `ServerSetupView` on first launch.
+- **First-run config on Matt's iPhone:**
+  - Server URL: `https://cnc-server.tailb85819.ts.net/abacus`
+  - API key: the `abacus_ios` raw_key from `.secrets/integration-keys.json`
+  - Tailscale must be active on the iPhone
+- **Building it:** requires Mac (Xcode). Project structure exists; out-of-scope for this Windows session.
+
+### Tech debt / follow-ups
+- **Vendor/Customer model still missing** — blocks `/v1/clients` endpoint
+- **CORS wildcard active in DEBUG mode on CNC** — fine because tailnet-only, but flip `DEBUG=false` in `/opt/abacus/.env` and restart `abacus-api` once the iOS apps don't need `/docs` open
+- **No rate limiting on /v1/*** — single-user system, low priority, but consider if tokens ever leak
+- **/kalshi/pnl deferred** — would need a Kalshi positions-tracking pipeline that doesn't exist yet
+- **Admin password still `changeme`** — same as prior handoff, rotate via `maintenance.py`
+
+### Quick commands
+```bash
+# On CNC: service control
+systemctl status abacus-api
+systemctl restart abacus-api
+journalctl -u abacus-api -f
+tail -f /opt/abacus/logs/uvicorn.log
+
+# On kokonoe: re-sync after edits
+scp "J:/QBO FOSS alternative/abacus/api/integrations.py" root@192.168.168.100:/opt/abacus/src/abacus/api/integrations.py
+ssh root@192.168.168.100 "systemctl restart abacus-api"
+
+# Smoke test from any tailnet device (PowerShell)
+$h = @{ "X-API-Key" = "<key from .secrets/integration-keys.json>" }
+Invoke-WebRequest -UseBasicParsing -Uri "https://cnc-server.tailb85819.ts.net/abacus/api/v1/health" -Headers $h
+```
+
+---
 
 ## What's done
 
